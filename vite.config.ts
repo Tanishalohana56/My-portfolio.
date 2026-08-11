@@ -4,7 +4,7 @@ import path from 'path';
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  base: '/My-portfolio./',
+  base: process.env.GITHUB_ACTIONS ? '/My-portfolio./' : '/',
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
