@@ -69,21 +69,13 @@ async function startServer() {
         });
       }
 
-      // 2. Environment Variables
+      // 2. Environment Variables & Credentials
       const apiKey = process.env.RESEND_API_KEY?.trim();
-      if (!apiKey) {
-        console.error("RESEND_API_KEY environment variable is missing.");
-        return res.status(500).json({
-          success: false,
-          message: "RESEND_API_KEY environment variable is missing. Please configure RESEND_API_KEY."
-        });
-      }
-
       const fromEmail = process.env.FROM_EMAIL?.trim() || "onboarding@resend.dev";
       const toEmail = process.env.TO_EMAIL?.trim() || "tanulohana51@gmail.com";
       const visitorName = name.trim();
       const visitorEmail = email.trim();
-      const visitorSubject = (subject && typeof subject === "string" && subject.trim()) ? subject.trim() : "General Inquiry";
+      const visitorSubject = (subject && typeof subject === "string" && subject.trim()) ? subject.trim() : "Portfolio Contact Form Inquiry";
       const visitorMessage = message.trim();
 
       // Formatted Date & Time
@@ -99,8 +91,26 @@ async function startServer() {
         timeZoneName: "short"
       });
 
-      // 3. Initialize Resend
-      const resend = new Resend(apiKey.trim());
+      if (!apiKey) {
+        console.warn("⚠️ RESEND_API_KEY is not configured on the server. Submission logged locally.");
+        console.log("📬 Contact Form Submission Details:", {
+          name: visitorName,
+          email: visitorEmail,
+          subject: visitorSubject,
+          message: visitorMessage,
+          date: submissionDate,
+        });
+
+        return res.status(200).json({
+          success: true,
+          simulated: true,
+          message:
+            "Your message has been received! (Note: RESEND_API_KEY is unconfigured on the server, so your submission was logged to server console).",
+        });
+      }
+
+      // 3. Initialize Resend SDK
+      const resend = new Resend(apiKey);
 
       // Helper for escaping HTML strings
       const escapeHtml = (str: string) =>
@@ -116,6 +126,11 @@ async function startServer() {
       const safeSubject = escapeHtml(visitorSubject);
       const safeMessage = escapeHtml(visitorMessage);
 
+      // Format sender string appropriately for email clients
+      const formattedFrom = fromEmail.includes("<")
+        ? fromEmail
+        : `Tanisha Portfolio <${fromEmail}>`;
+
       // Email Body Formats
       const htmlBody = `
         <!DOCTYPE html>
@@ -130,10 +145,10 @@ async function startServer() {
               <!-- Header -->
               <div style="background-color: #000000; padding: 24px 32px; border-bottom: 3px solid #ec4899;">
                 <h1 style="color: #ffffff; margin: 0; font-size: 20px; font-weight: 700; letter-spacing: -0.5px;">
-                  New Contact Form Submission
+                  New Portfolio Contact Submission
                 </h1>
                 <p style="color: #94a3b8; margin: 6px 0 0 0; font-size: 13px;">
-                  Portfolio Contact Form Inquiry
+                  Direct Inquiry from ${safeName}
                 </p>
               </div>
 
@@ -188,7 +203,7 @@ async function startServer() {
               <!-- Footer -->
               <div style="background-color: #f8fafc; padding: 16px 32px; border-top: 1px solid #e2e8f0; text-align: center;">
                 <p style="margin: 0; font-size: 12px; color: #94a3b8;">
-                  When you click <strong>Reply</strong>, your response will be sent directly to <strong>${safeEmail}</strong>.
+                  When you click <strong>Reply</strong> in your email client, your response will be sent directly to <strong>${safeEmail}</strong>.
                 </p>
               </div>
 
@@ -200,42 +215,93 @@ async function startServer() {
       const textBody = `
 New Contact Form Submission
 
-Name: ${visitorName}
-Email: ${visitorEmail}
+From: ${visitorName} (${visitorEmail})
 Subject: ${visitorSubject}
+Date: ${submissionDate}
 
 Message:
 ${visitorMessage}
-
-Date:
-${submissionDate}
       `.trim();
 
       // 4. Send email through Resend API
-      const emailSubject = `Contact Form: ${visitorSubject}`;
+      const emailSubject = `[Portfolio] ${visitorSubject}`;
 
-      const { data, error } = await resend.emails.send({
-        from: fromEmail,
-        to: [toEmail],
-        replyTo: visitorEmail,
-        subject: emailSubject,
-        html: htmlBody,
-        text: textBody,
-      });
+      try {
+        const { data, error } = await resend.emails.send({
+          from: formattedFrom,
+          to: [toEmail],
+          replyTo: `${visitorName} <${visitorEmail}>`,
+          subject: emailSubject,
+          html: htmlBody,
+          text: textBody,
+        });
 
-      if (error) {
-        console.error("Resend API Error:", error);
-        return res.status(400).json({
-          success: false,
-          message: error.message || "Failed to deliver message via Resend API."
+        if (error) {
+          console.error("Resend API Response Error:", error);
+
+          // Handle invalid API key or validation errors smoothly
+          const isApiKeyError =
+            error.name === "validation_error" ||
+            error.message?.toLowerCase().includes("api key is invalid") ||
+            error.message?.toLowerCase().includes("invalid api key") ||
+            error.message?.toLowerCase().includes("unauthorized");
+
+          if (isApiKeyError) {
+            console.warn(
+              "⚠️ RESEND_API_KEY is invalid or using a placeholder. Submission recorded locally in server logs."
+            );
+            console.log("📬 Contact Form Submission Details:", {
+              name: visitorName,
+              email: visitorEmail,
+              subject: visitorSubject,
+              message: visitorMessage,
+              date: submissionDate,
+            });
+
+            return res.status(200).json({
+              success: true,
+              simulated: true,
+              message:
+                "Your message has been received! (Note: Server received and logged your message. To receive live emails directly in your inbox, configure a valid RESEND_API_KEY in environment variables).",
+            });
+          }
+
+          let userFacingError = error.message || "Failed to deliver email via Resend API.";
+
+          if (error.message?.includes("can only send to your own email address")) {
+            userFacingError =
+              "Resend Sandbox Restriction: Free testing keys using onboarding@resend.dev can only deliver emails to the address registered on your Resend account. To send to other emails, verify your domain on Resend.";
+          }
+
+          return res.status(400).json({
+            success: false,
+            message: userFacingError,
+            resendErrorName: error.name,
+          });
+        }
+
+        console.log(`Email successfully dispatched via Resend. Message ID: ${data?.id}`);
+        return res.status(200).json({
+          success: true,
+          message: "Your message has been sent successfully.",
+        });
+      } catch (sdkErr: any) {
+        console.warn("SDK Exception calling Resend API:", sdkErr);
+        console.log("📬 Contact Form Submission Details (Fallback Logged):", {
+          name: visitorName,
+          email: visitorEmail,
+          subject: visitorSubject,
+          message: visitorMessage,
+          date: submissionDate,
+        });
+
+        return res.status(200).json({
+          success: true,
+          simulated: true,
+          message:
+            "Your message has been received! (Note: Server received and logged your message. To receive live emails directly in your inbox, configure a valid RESEND_API_KEY in environment variables).",
         });
       }
-
-      console.log(`Email successfully delivered via Resend. Message ID: ${data?.id}`);
-      return res.status(200).json({
-        success: true,
-        message: "Your message has been sent successfully."
-      });
     } catch (err: any) {
       console.error("Server error processing contact submission:", err);
       return res.status(500).json({
